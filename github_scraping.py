@@ -1,75 +1,138 @@
 import requests
 import json
-import git
+import os
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from datetime import datetime
+from pathlib import Path
 
 '''
-    Scraping Github repositories using Github API
+    Scraping Github repositories and creating a parquet file with columns:
+    1. code content
+    2. file timestamp
+    3. file path name
+    4. file type
+    5. repository name
+    6. repository url  
+
+    paramters:
         token: Github personal access token
         language: Programming language to search for
+        file_extension: File extension to search for, usually same as language
         time_year: Year to search for
         time_month: Month to search for
         parent_dir: Parent directory to save the repositories
+        file_name: Name of the parquet file
+        afterGPT: True if we want to scrape repositories after ChatGPT was released
         download_limit: Number of repositories to download
         additional_query: Additional query parameters to search for
+        
 '''
-def github_scraping(token, language, time_year, time_month, parent_dir, download_limit = 1, additional_query = ''):
+def github_scraping(token, language, file_extension, time_year, time_month, 
+                    parent_dir, file_name, afterGPT, download_limit = 1, additional_query = ''):
+    # format variables
+    time_month = str(time_month).zfill(2)
+    if not isinstance(file_extension, list):
+        file_extension = [file_extension]
     query = f'language:{language} {additional_query} created:{time_year}-{time_month}-01..{time_year}-{time_month}-30'
     url = f'https://api.github.com/search/repositories?q={query}&per_page=100'
     headers = {'Authorization': f'token {token}'}
 
     '''
-        Collecting information from Github API using the given url and token headers
+        Collecting repository information
     '''
     def fetch_repositories(url, headers):
         repos = []
         while url:
             response = requests.get(url, headers=headers)
+            print(response)
             if response.status_code != 200:
                 print(f'Error: {response.status_code}')
                 break
             result = response.json()
             repos.extend(result.get('items', []))
-            
-            if 'next' in response.links:
-                url = response.links['next']['url']
-            else:
-                url = None
+            url = response.links.get('next', {}).get('url')
             if len(repos) >= download_limit:
                 break
-        return repos
-
-
+        return repos[:download_limit]
     repositories = fetch_repositories(url, headers)
-    
 
-    #Saving the repositories to a json file
-    with open(f'{parent_dir}.json', 'w') as f:
-        json.dump(repositories, f, indent=4)
+    '''
+        Collecting files information in given repository
+    '''
+    def fetch_files(repo, headers):
+        py_files = []
+        repo_name = repo['full_name']
+        repo_url = repo['html_url']
+        contents_url = f'https://api.github.com/repos/{repo_name}/contents'
 
-    print(f'Total repositories fetched: {len(repositories)}')
+        def parse_contents(url):
+            response = requests.get(url, headers=headers)
+            if response.status_code != 200:
+                print(f'Error fetching contents for {repo_name}: {response.status_code}')
+                return
+            items = response.json()
+            for item in items:
+                if item['type'] == 'file' and any(item['name'].endswith(ext) for ext in file_extension):
+                    file_response = requests.get(item['download_url'], headers=headers)
+                    commit_url =  f'https://api.github.com/repos/{repo_name}/commits?path={item["path"]}'
+                    commit_response = requests.get(commit_url, headers=headers)
+                    if file_response.status_code == 200 and commit_response.status_code == 200:
+                        commit_info = commit_response.json()
+                        for cur_commit in commit_info:
+                            timestamp = cur_commit['commit']['committer']['date']
+                            time = datetime.fromisoformat(timestamp[:-1])
+                            '''
+                            If we want to find the file before ChatGPT was released,
+                            we need to loop the commit logs until find the commit date 
+                            before the ChatGPT release (setting the date to 2022-11-01)
+                            '''
+                            if afterGPT or time < datetime(2022, 11, 1):
+                                py_files.append({
+                                    'content': file_response.text,
+                                    'timestamp': timestamp,
+                                    'file_path': item['path'],
+                                    'file_type': Path(item['name']).suffix.lstrip('.'),
+                                    'repo_name': repo_name,
+                                    'repo_url': repo_url,
+                                })
+                                break
+                        
+                elif item['type'] == 'dir':
+                    parse_contents(item['url'])
 
-    clone_url_list = []
+        parse_contents(contents_url)
+        return py_files
+
+
+    all_py_files = []
+    # loop through repositories and fetch files
     for repo in repositories:
-        clone_url = repo.get('clone_url')
-        clone_url_list.append(clone_url)
+        py_files = fetch_files(repo, headers)
+        all_py_files.extend(py_files)
+        
+    if not os.path.exists(parent_dir):
+        os.makedirs(parent_dir)
 
+    # save to parquet file
+    df = pd.DataFrame(all_py_files)
+    table = pa.Table.from_pandas(df)
+    pq.write_table(table, f'{parent_dir}/{file_name}.parquet')
 
-    for index, repo_url in enumerate(clone_url_list):
-        try:
-            if index >= download_limit:
-                break
-            repository_name = repo_url.split('/')[-1].replace('.git', '')
-            clone_dir = f'{parent_dir}/{repository_name}'
-            print(f'Cloning {repo_url} to {repository_name}')
-            git.Repo.clone_from(repo_url, clone_dir)
-        except:
-            print(f'Error cloning {clone_url}')
+    print(f'Total files fetched: {len(all_py_files)}')
+    return all_py_files
 
 # Example
 token = 'YOUR_GITHUB_TOKEN'
 time_year = '2023'
-time_month = '11'
+time_month = '9'
 language = 'Python'
 parent_dir = 'web_implementation'
+file_name = 'python_files_new'
 additional_query = 'web OR flask OR django'
-github_scraping(token, language, time_year, time_month, parent_dir)
+afterGPT = True
+file_extension = ['.py', '.html']
+download_limit = 10
+table = github_scraping(token, language, file_extension, time_year, time_month, 
+                        parent_dir, file_name, afterGPT, download_limit, additional_query)
