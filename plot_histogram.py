@@ -10,13 +10,14 @@ plot histogram by given python file
 paramters:
         df: pandas dataframe, contains the code length of each function
         parent_dir: the parent directory to save histogram
+        detailed_dir: the detailed directory to save histogram
 '''
-def plot_histogram(df, parent_dir):
+def plot_histogram(df, parent_dir, detailed_dir):
         grouped = df.groupby('file_path')
         bins = [0,11, 21, 31, 41, 51, 61, 71, 81, 91, 101, 201, 301, 401]
         xticks = bins
         xtick_labels = ['1-10', '11-20', '21-30', '31-40', '41-50', '51-60', '61-70', '71-80', '81-90', '91-100', '101-200', '201-300', '300+']
-        save_parent_path = f'{parent_dir}/histogram'
+        save_parent_path =  f'{parent_dir}/histogram/{detailed_dir}'
         if not os.path.exists(save_parent_path):
                 os.makedirs(save_parent_path)
         for file_path, group in grouped:
@@ -40,11 +41,13 @@ def plot_histogram(df, parent_dir):
                 plt.close()
 
 # list of directores to process
-query_directories = ['blog', 'data_visualization', 'ecommerce', 'social_media']
+query_directories = ['ecommerce', 'blog', 'social_media', 'data_visualization']
 
 # loop through directories and plot histograms
 for query_dir in query_directories:
         parquet_files = glob.glob(os.path.join(query_dir, 'functions/*.parquet'))
-        df = pd.read_parquet(parquet_files)
-        plot_histogram(df, query_dir)
-        print(f'Finished plotting histograms for {query_dir}')
+        for parquet_file in parquet_files:
+            df = pd.read_parquet(parquet_file)
+            detailed_dir = parquet_file.rsplit('/', 1)[-1]
+            plot_histogram(df, query_dir,detailed_dir)
+            print(f'Finished plotting histograms for {query_dir}/{detailed_dir}')
